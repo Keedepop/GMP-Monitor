@@ -1009,22 +1009,32 @@ class MonitorApp(QMainWindow):
         visible = []
         search = self._log_search.text().strip().lower()
 
+        _MONITOR_PREFIXES = ("/monitor/", "/version")
+
         for row in self._log_history:
-            s = row.get("status", 0)
+            s    = row.get("status", 0)
+            path = row.get("path", "")
+
             # Filtre statut HTTP
             if filt == "2xx" and not (200 <= s < 300): continue
             if filt == "4xx" and not (400 <= s < 500): continue
             if filt == "5xx" and not (s >= 500):        continue
             if filt == "err" and not (s >= 400):        continue
+
             # Filtre texte libre
+            haystack = " ".join([
+                row.get("ts",""), row.get("ip",""),
+                row.get("method",""), path,
+                str(s), str(row.get("ms",""))
+            ]).lower()
             if search:
-                haystack = " ".join([
-                    row.get("ts",""), row.get("ip",""),
-                    row.get("method",""), row.get("path",""),
-                    str(s), str(row.get("ms",""))
-                ]).lower()
                 if search not in haystack:
                     continue
+            else:
+                # Masquer les appels internes du moniteur sauf si recherche active
+                if any(path.startswith(p) for p in _MONITOR_PREFIXES):
+                    continue
+
             visible.append(row)
 
         total = len(self._log_history)
