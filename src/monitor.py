@@ -20,10 +20,9 @@ from PyQt6.QtWidgets import (
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QSizePolicy, QLineEdit,
 )
-from PyQt6.QtCore import Qt, QPoint, QTimer, QThread, pyqtSignal, QEvent
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import (
-    QFont, QCursor, QColor, QPainter, QPen,
-    QMouseEvent, QIcon,
+    QFont, QCursor, QColor, QPainter, QPen, QIcon,
 )
 
 # ── Palette identique V5 ──────────────────────────────────────────────────
@@ -49,9 +48,9 @@ C: dict[str, str] = {
 # ── Config ────────────────────────────────────────────────────────────────
 BASE_DIR  = Path(__file__).resolve().parent.parent
 CFG_FILE  = BASE_DIR / "monitor_config.json"
-OVH_URL   = "http://51.83.74.243:8000"
+OVH_URL   = "https://bdc.gersmotopieces.com"
 OVH_KEY   = "gmp_fGPsjgfjk465fdf48ghHQd5Gsq592GAqpdGe4"
-APP_VER   = "1.1.0"
+APP_VER   = "1.2.0"
 REFRESH_S = 30
 
 def _load_cfg() -> dict:
@@ -133,6 +132,11 @@ class Gauge(QWidget):
     def set_value(self, pct: float, label: str = ""):
         self._pct   = max(0.0, min(100.0, pct))
         self._label = label
+        self.update()
+
+    def resize_to(self, size: int):
+        self._sz = size
+        self.setFixedSize(size, size)
         self.update()
 
     def _arc_color(self) -> str:
@@ -427,12 +431,120 @@ class DiskCard(QWidget):
             free_lbl.setText("")
 
 
+# ── Barre colorée fixe (trafic API) ──────────────────────────────────────
+class _ColorBar(QWidget):
+    def __init__(self, color: str, parent=None):
+        super().__init__(parent)
+        self._pct   = 0.0
+        self._color = color
+        self.setFixedHeight(5)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_pct(self, pct: float):
+        self._pct = max(0.0, min(100.0, pct))
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(C["surface2"]))
+        w = max(0, int(self.width() * self._pct / 100))
+        if w:
+            p.fillRect(0, 0, w, self.height(), QColor(self._color))
+
+
+# ── Carte Trafic API ──────────────────────────────────────────────────────
+class ApiTrafficCard(QWidget):
+    _CATS = [
+        ("Dyson",    "/dyson",    C["red"]),
+        ("Prix",     "/prix",     C["amber"]),
+        ("Bible",    "/bible",    "#7c8cf8"),
+        ("Version",  "/version",  "#00bcd4"),
+        ("Wishlist", "/wishlist", C["dim"]),
+        ("Autres",   None,        C["muted"]),
+    ]
+    _MONITOR = ("/monitor/", "/favicon")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(
+            f"background:{C['surface']};border:1px solid {C['border']};border-radius:8px;"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(4)
+
+        head = QWidget(); head.setStyleSheet("background:transparent;")
+        hh = QHBoxLayout(head); hh.setContentsMargins(0, 0, 0, 0)
+        hh.addWidget(lbl("TRAFIC API", size=10, bold=True, color=C["dim"]))
+        hh.addStretch()
+        self._badge = lbl("", size=9, mono=True)
+        self._badge.setStyleSheet(
+            f"color:{C['dim']};background:{C['surface2']};border:1px solid {C['border']};"
+            "border-radius:3px;padding:1px 5px;"
+        )
+        hh.addWidget(self._badge)
+        lay.addWidget(head)
+        lay.addWidget(sep())
+
+        self._rows: list = []
+        for name, _, color in self._CATS:
+            row = QWidget(); row.setStyleSheet("background:transparent;")
+            rv = QHBoxLayout(row); rv.setContentsMargins(0, 1, 0, 1); rv.setSpacing(6)
+            name_lbl = lbl(name, size=9, color=C["dim"])
+            name_lbl.setFixedWidth(52)
+            count_lbl = lbl("—", size=9, mono=True)
+            count_lbl.setFixedWidth(36)
+            count_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            bar = _ColorBar(color)
+            rv.addWidget(name_lbl)
+            rv.addWidget(bar, stretch=1)
+            rv.addWidget(count_lbl)
+            lay.addWidget(row)
+            self._rows.append((name_lbl, bar, count_lbl))
+
+        lay.addWidget(sep())
+        self._ip_lbl = lbl("", size=9, color=C["dim"])
+        lay.addWidget(self._ip_lbl)
+        lay.addStretch()
+
+    def update_from_logs(self, logs: list):
+        cats: dict = {name: 0 for name, _, _ in self._CATS}
+        ip_counts: collections.Counter = collections.Counter()
+        for row in logs:
+            path = row.get("path", "")
+            ip   = row.get("ip", "")
+            if any(path.startswith(p) for p in self._MONITOR):
+                continue
+            if ip:
+                ip_counts[ip] += 1
+            matched = False
+            for name, prefix, _ in self._CATS[:-1]:
+                if prefix and path.startswith(prefix):
+                    cats[name] += 1
+                    matched = True
+                    break
+            if not matched:
+                cats["Autres"] += 1
+        total = sum(cats.values()) or 1
+        for i, (name, _, _) in enumerate(self._CATS):
+            _, bar, count_lbl = self._rows[i]
+            n = cats.get(name, 0)
+            bar.set_pct(n / total * 100)
+            count_lbl.setText(str(n))
+        n_ips = len(ip_counts)
+        self._badge.setText(f"{n_ips} IP{'s' if n_ips > 1 else ''}")
+        if ip_counts:
+            top_ip, top_n = ip_counts.most_common(1)[0]
+            self._ip_lbl.setText(f"Top : {top_ip} ({top_n} req)")
+        else:
+            self._ip_lbl.setText("")
+
+
 # ── TitleBar ──────────────────────────────────────────────────────────────
 class TitleBar(QWidget):
     def __init__(self, parent: "MonitorApp"):
         super().__init__(parent)
         self._parent   = parent
-        self._drag_pos: QPoint | None = None
         self.setFixedHeight(52)
         self.setStyleSheet(f"background:{C['panel']};border-bottom:1px solid {C['border']};")
 
@@ -458,30 +570,46 @@ class TitleBar(QWidget):
         lay.addWidget(lbl(f"v{APP_VER}", size=9, mono=True, color=C["muted"]))
         lay.addSpacing(16)
 
-        _ws = (
-            f"QPushButton {{background:transparent;color:{C['dim']};border-radius:4px;font-size:13px;}}"
+        _ws_chk = (
+            f"QPushButton {{background:transparent;color:{C['dim']};border-radius:4px;font-size:11px;}}"
             f"QPushButton:hover {{background:{C['surface2']};color:{C['text']};}}"
+            f"QPushButton:checked {{background:{C['border2']};color:{C['text']};}}"
         )
-        _wxs = (
-            f"QPushButton {{background:transparent;color:{C['dim']};border-radius:4px;font-size:13px;}}"
-            f"QPushButton:hover {{background:{C['red_dim']};color:{C['text']};}}"
-        )
-        b_min = QPushButton("─"); b_min.setFixedSize(28, 28); b_min.setStyleSheet(_ws)
-        b_min.clicked.connect(parent.showMinimized)
 
-        self._b_max = QPushButton("□"); self._b_max.setFixedSize(28, 28); self._b_max.setStyleSheet(_ws)
-        self._b_max.clicked.connect(self._toggle_max)
+        self._refresh_cycle_btn = QPushButton("30s")
+        self._refresh_cycle_btn.setFixedSize(36, 28)
+        self._refresh_cycle_btn.setStyleSheet(_ws_chk)
+        self._refresh_cycle_btn.setToolTip("Intervalle de rafraîchissement")
+        self._refresh_cycle_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._refresh_cycle_btn.clicked.connect(parent._cycle_refresh)
 
-        b_cls = QPushButton("✕"); b_cls.setFixedSize(28, 28); b_cls.setStyleSheet(_wxs)
-        b_cls.clicked.connect(parent.close)
+        self._pin_btn = QPushButton("📌")
+        self._pin_btn.setFixedSize(28, 28)
+        self._pin_btn.setStyleSheet(_ws_chk)
+        self._pin_btn.setToolTip("Épingler au premier plan")
+        self._pin_btn.setCheckable(True)
+        self._pin_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._pin_btn.clicked.connect(parent._toggle_always_on_top)
 
-        for btn in (b_min, self._b_max, b_cls):
+        self._tv_btn = QPushButton("⊞")
+        self._tv_btn.setFixedSize(28, 28)
+        self._tv_btn.setStyleSheet(_ws_chk)
+        self._tv_btn.setToolTip("Mode tableau de bord")
+        self._tv_btn.setCheckable(True)
+        self._tv_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._tv_btn.clicked.connect(parent._toggle_tv_mode)
+
+        self._cfg_btn = QPushButton("⚙")
+        self._cfg_btn.setFixedSize(28, 28)
+        self._cfg_btn.setStyleSheet(_ws_chk)
+        self._cfg_btn.setToolTip("Paramètres de connexion")
+        self._cfg_btn.setCheckable(True)
+        self._cfg_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._cfg_btn.clicked.connect(parent._toggle_settings)
+
+        lay.addSpacing(8)
+        for btn in (self._refresh_cycle_btn, self._pin_btn, self._tv_btn, self._cfg_btn):
             lay.addWidget(btn)
-
-    def _toggle_max(self):
-        p = self._parent
-        if p.isMaximized(): p.showNormal();    self._b_max.setText("□")
-        else:               p.showMaximized(); self._b_max.setText("❐")
 
     def set_status(self, ok: bool | None, tip: str = ""):
         color = C["green"] if ok is True else C["red"] if ok is False else C["dim"]
@@ -494,16 +622,6 @@ class TitleBar(QWidget):
     def set_refresh_label(self, txt: str):
         self._refresh_lbl.setText(txt)
 
-    def mousePressEvent(self, ev: QMouseEvent):
-        if ev.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = ev.globalPosition().toPoint() - self._parent.frameGeometry().topLeft()
-
-    def mouseMoveEvent(self, ev: QMouseEvent):
-        if self._drag_pos and ev.buttons() == Qt.MouseButton.LeftButton:
-            self._parent.move(ev.globalPosition().toPoint() - self._drag_pos)
-
-    def mouseReleaseEvent(self, _): self._drag_pos = None
-    def mouseDoubleClickEvent(self, _): self._toggle_max()
 
 # ══════════════════════════════════════════════════════════════════════════
 # FENÊTRE PRINCIPALE
@@ -511,25 +629,31 @@ class TitleBar(QWidget):
 class MonitorApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setMinimumSize(960, 700)
         self.resize(1200, 820)
-        self.setStyleSheet(
-            f"QMainWindow,QWidget#root{{background:{C['bg']};border:1px solid {C['border2']};}}"
-        )
+        self.setWindowTitle("GMP Monitor")
+        self.setStyleSheet(f"QMainWindow,QWidget#root{{background:{C['bg']};}}")
 
         icon_p = BASE_DIR / "assets" / "monitor.ico"
         if icon_p.exists(): self.setWindowIcon(QIcon(str(icon_p)))
 
         self._cfg       = _load_cfg()
         self._workers   : list[QThread] = []
-        self._countdown = REFRESH_S
+        self._refresh_s = REFRESH_S
+        self._countdown = self._refresh_s
 
         # Historique cumulatif des logs de session
         self._log_history : collections.deque = collections.deque(maxlen=1000)
         self._log_seen    : set = set()        # clés (ts, ip, method, path) déjà vues
         self._log_filter  : str = "all"
         self._log_new_count: int = 0
+        self._openapi_exposed: bool = True  # mis à jour au 1er fetch
+        self._own_ip      : str | None = None  # IP du poste monitor, détectée automatiquement
+        self._tv_mode       : bool = False
+        self._always_on_top : bool = False
+        self._refresh_intervals = [5, 10, 30, 60]
+        self._refresh_idx       = 2          # 30s par défaut
+        self._refresh_s         = REFRESH_S
 
         # Suivi des compteurs réseau précédents pour calcul de débit
         self._prev_net_sent: int | None = None
@@ -562,27 +686,10 @@ class MonitorApp(QMainWindow):
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(12)
 
-        # Barre d'actions
-        actions = QWidget(); actions.setStyleSheet("background:transparent;")
-        ah = QHBoxLayout(actions); ah.setContentsMargins(0, 0, 0, 0); ah.setSpacing(8)
-
-        self._url_entry = QLineEdit(self._cfg.get("url", OVH_URL))
-        self._url_entry.setFixedHeight(30); self._url_entry.setFixedWidth(220)
-        self._url_entry.setPlaceholderText("http://IP:PORT")
-        self._url_entry.setStyleSheet(
+        _field_ss = (
             f"QLineEdit{{background:{C['entry']};border:1px solid {C['border2']};"
             f"border-radius:4px;padding:2px 8px;color:{C['text']};font-size:10px;font-family:monospace;}}"
         )
-
-        self._key_entry = QLineEdit(self._cfg.get("key", OVH_KEY))
-        self._key_entry.setFixedHeight(30); self._key_entry.setFixedWidth(180)
-        self._key_entry.setEchoMode(QLineEdit.EchoMode.Password)
-        self._key_entry.setPlaceholderText("API Key")
-        self._key_entry.setStyleSheet(
-            f"QLineEdit{{background:{C['entry']};border:1px solid {C['border2']};"
-            f"border-radius:4px;padding:2px 8px;color:{C['text']};font-size:10px;font-family:monospace;}}"
-        )
-
         _btn = (
             f"QPushButton{{background:{C['surface2']};color:{C['text']};border:1px solid {C['border2']};"
             f"border-radius:4px;padding:4px 14px;font-size:10px;font-weight:700;}}"
@@ -595,10 +702,45 @@ class MonitorApp(QMainWindow):
             f"QPushButton:hover{{background:{C['border']};}}"
         )
 
-        save_btn = QPushButton("💾"); save_btn.setFixedSize(30, 30)
-        save_btn.setStyleSheet(_btn); save_btn.setToolTip("Sauvegarder la configuration")
+        # ── Panneau paramètres (masqué par défaut) ────────────────────────
+        self._settings_panel = QWidget()
+        self._settings_panel.setStyleSheet(
+            f"background:{C['surface']};border:1px solid {C['border']};"
+            f"border-radius:6px;"
+        )
+        sp = QHBoxLayout(self._settings_panel)
+        sp.setContentsMargins(14, 8, 14, 8); sp.setSpacing(10)
+
+        self._url_entry = QLineEdit(self._cfg.get("url", OVH_URL))
+        self._url_entry.setFixedHeight(28); self._url_entry.setFixedWidth(260)
+        self._url_entry.setEchoMode(QLineEdit.EchoMode.Password)
+        self._url_entry.setPlaceholderText("https://domaine.com")
+        self._url_entry.setStyleSheet(_field_ss)
+
+        self._key_entry = QLineEdit(self._cfg.get("key", OVH_KEY))
+        self._key_entry.setFixedHeight(28); self._key_entry.setFixedWidth(220)
+        self._key_entry.setEchoMode(QLineEdit.EchoMode.Password)
+        self._key_entry.setPlaceholderText("API Key")
+        self._key_entry.setStyleSheet(_field_ss)
+
+        save_btn = QPushButton("💾  Sauvegarder"); save_btn.setFixedHeight(28)
+        save_btn.setStyleSheet(_btn)
         save_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         save_btn.clicked.connect(self._save_cfg)
+
+        sp.addWidget(lbl("Serveur :", size=9, color=C["dim"]))
+        sp.addWidget(self._url_entry)
+        sp.addWidget(lbl("Clé API :", size=9, color=C["dim"]))
+        sp.addWidget(self._key_entry)
+        sp.addWidget(save_btn)
+        sp.addStretch()
+
+        self._settings_panel.setVisible(False)
+        lay.addWidget(self._settings_panel)
+
+        # ── Barre d'actions ───────────────────────────────────────────────
+        actions = QWidget(); actions.setStyleSheet("background:transparent;")
+        ah = QHBoxLayout(actions); ah.setContentsMargins(0, 0, 0, 0); ah.setSpacing(8)
 
         refresh_btn = QPushButton("⟳  ACTUALISER"); refresh_btn.setFixedHeight(30)
         refresh_btn.setStyleSheet(_btn_red)
@@ -607,15 +749,10 @@ class MonitorApp(QMainWindow):
 
         self._latency_lbl = lbl("", size=9, mono=True, color=C["dim"])
 
-        ah.addWidget(lbl("Serveur :", size=9, color=C["dim"]))
-        ah.addWidget(self._url_entry)
-        ah.addWidget(lbl("Clé :", size=9, color=C["dim"]))
-        ah.addWidget(self._key_entry)
-        ah.addWidget(save_btn)
-        ah.addSpacing(8)
         ah.addWidget(refresh_btn)
         ah.addStretch()
         ah.addWidget(self._latency_lbl)
+        self._actions_bar = actions
         lay.addWidget(actions)
 
         # Grille
@@ -635,8 +772,10 @@ class MonitorApp(QMainWindow):
         # Ligne 1 : BASE DE DONNÉES (2 cols) · RÉSEAU (2 cols)
         self._card_db      = self._make_db_card()
         self._card_network = NetworkCard()
+        self._card_traffic = ApiTrafficCard()
         gl.addWidget(self._card_db,      1, 0, 1, 2)
-        gl.addWidget(self._card_network, 1, 2, 1, 2)
+        gl.addWidget(self._card_network, 1, 2, 1, 1)
+        gl.addWidget(self._card_traffic, 1, 3, 1, 1)
 
         # Ligne 2 : Journal d'accès (4 cols, prend tout l'espace restant)
         self._card_log = self._make_log_card()
@@ -679,6 +818,18 @@ class MonitorApp(QMainWindow):
         cv.addWidget(_row("Latence API",      self._st_ping))
         cv.addWidget(_row("Requêtes loggées", self._st_requests))
         cv.addWidget(_row("Dernière version", self._st_version))
+        self._st_ver_notes = lbl("", size=8, color=C["muted"])
+        self._st_ver_notes.setWordWrap(True)
+        cv.addWidget(self._st_ver_notes)
+
+        cv.addWidget(sep())
+        cv.addWidget(lbl("SÉCURITÉ", size=9, bold=True, color=C["dim"]))
+        self._sec_https   = lbl("⚠  HTTP — communication non chiffrée", size=9, color=C["amber"])
+        self._sec_openapi = lbl("⚠  /openapi.json accessible sans auth", size=9, color=C["amber"])
+        self._sec_auth    = lbl("✓  Auth X-API-Key sur toutes les routes", size=9, color=C["green"])
+        cv.addWidget(self._sec_https)
+        cv.addWidget(self._sec_openapi)
+        cv.addWidget(self._sec_auth)
         cv.addStretch()
         return card
 
@@ -842,6 +993,36 @@ class MonitorApp(QMainWindow):
 
     # ── Fetch / données ───────────────────────────────────────────────────
 
+    def _cycle_refresh(self):
+        self._refresh_idx = (self._refresh_idx + 1) % len(self._refresh_intervals)
+        self._refresh_s   = self._refresh_intervals[self._refresh_idx]
+        self._countdown   = self._refresh_s
+        self._title_bar._refresh_cycle_btn.setText(f"{self._refresh_s}s")
+
+    def _toggle_settings(self):
+        visible = not self._settings_panel.isVisible()
+        self._settings_panel.setVisible(visible)
+        self._title_bar._cfg_btn.setChecked(visible)
+
+    def _toggle_always_on_top(self):
+        self._always_on_top = not self._always_on_top
+        flags = Qt.WindowType.Window
+        if self._always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.show()
+        self._title_bar._pin_btn.setChecked(self._always_on_top)
+
+    def _toggle_tv_mode(self):
+        self._tv_mode = not self._tv_mode
+        self._actions_bar.setVisible(not self._tv_mode)
+        gauge_size = 140 if self._tv_mode else 100
+        for card in (self._card_cpu, self._card_ram):
+            card.gauge.resize_to(gauge_size)
+        if self._tv_mode:
+            self.showMaximized()
+        self._title_bar._tv_btn.setChecked(self._tv_mode)
+
     def _save_cfg(self):
         url = self._url_entry.text().strip().rstrip("/")
         key = self._key_entry.text().strip()
@@ -864,13 +1045,23 @@ class MonitorApp(QMainWindow):
         log_ = self._api("/monitor/access_log", n=200)
         ver_ = self._api("/version")
         lat  = round((time.time() - t0) * 1000)
-        return {"sys": sys_, "db": db_, "log": log_, "ver": ver_, "lat_ms": lat}
+        # Vérifie si /openapi.json est accessible sans authentification
+        openapi_exposed = False
+        try:
+            url = self._cfg.get("url", OVH_URL).rstrip("/") + "/openapi.json"
+            req = urllib.request.Request(url)  # sans X-API-Key intentionnellement
+            with urllib.request.urlopen(req, timeout=5) as r:
+                openapi_exposed = (r.status == 200)
+        except Exception:
+            pass
+        return {"sys": sys_, "db": db_, "log": log_, "ver": ver_, "lat_ms": lat,
+                "openapi_exposed": openapi_exposed}
 
     def _refresh(self):
         url = self._url_entry.text().strip()
         if not url: return
         self._cfg = {"url": url, "key": self._key_entry.text().strip()}
-        self._countdown = REFRESH_S
+        self._countdown = self._refresh_s
         self._title_bar.set_refresh_label("Actualisation…")
         self._latency_lbl.setText("")
         self._title_bar.set_status(None)
@@ -881,7 +1072,7 @@ class MonitorApp(QMainWindow):
         w.start()
 
     def _on_data(self, data: dict):
-        self._countdown = REFRESH_S
+        self._countdown = self._refresh_s
         self._title_bar.set_status(True, "Serveur OVH connecté")
         lat = data.get("lat_ms", 0)
         self._latency_lbl.setText(f"latence {lat} ms")
@@ -952,6 +1143,30 @@ class MonitorApp(QMainWindow):
         self._st_ping.setText(f"{lat} ms")
         self._st_version.setText(ver_.get("version", "?"))
 
+        notes = ver_.get("notes", "")
+        self._st_ver_notes.setText(
+            (notes[:100] + "…") if len(notes) > 100 else notes
+        )
+
+        openapi_exp = data.get("openapi_exposed", True)
+        self._openapi_exposed = openapi_exp
+        if openapi_exp:
+            self._sec_openapi.setText("⚠  /openapi.json accessible sans auth")
+            self._sec_openapi.setStyleSheet(f"color:{C['amber']};background:transparent;")
+        else:
+            self._sec_openapi.setText("✓  /openapi.json protégé")
+            self._sec_openapi.setStyleSheet(f"color:{C['green']};background:transparent;")
+
+        url = self._cfg.get("url", OVH_URL)
+        if url.startswith("https://"):
+            self._sec_https.setText("✓  HTTPS — communication chiffrée (TLS)")
+            self._sec_https.setStyleSheet(f"color:{C['green']};background:transparent;")
+        else:
+            self._sec_https.setText("⚠  HTTP — communication non chiffrée")
+            self._sec_https.setStyleSheet(f"color:{C['amber']};background:transparent;")
+
+        self._card_traffic.update_from_logs(list(self._log_history))
+
     def _on_error(self, err: str):
         self._title_bar.set_status(False, f"Erreur : {err[:80]}")
         self._title_bar.set_refresh_label(f"Erreur — {err[:60]}")
@@ -966,6 +1181,12 @@ class MonitorApp(QMainWindow):
                 self._log_seen.add(key)
                 self._log_history.appendleft(row)   # plus récent en tête
                 new_count += 1
+        # Détecter l'IP propre du moniteur à partir des entrées /openapi.json déjà loggées
+        if self._own_ip is None:
+            for row in self._log_history:
+                if row.get("path") == "/openapi.json":
+                    self._own_ip = row.get("ip")
+                    break
         self._log_new_count = new_count
         self._render_log_table()
 
@@ -999,6 +1220,7 @@ class MonitorApp(QMainWindow):
             self._log_count_lbl.setText(f"Erreur historique : {data.get('error','?')}")
             return
         self._ingest_log_entries(data.get("log", []))
+        self._card_traffic.update_from_logs(list(self._log_history))
         total_file = data.get("total", 0)
         self._log_count_lbl.setText(
             f"{len(self._log_history)} entrées chargées (fichier serveur : {total_file} lignes)"
@@ -1033,6 +1255,9 @@ class MonitorApp(QMainWindow):
             else:
                 # Masquer les appels internes du moniteur sauf si recherche active
                 if any(path.startswith(p) for p in _MONITOR_PREFIXES):
+                    continue
+                # Masquer /openapi.json de notre propre IP — les autres IPs restent visibles
+                if path == "/openapi.json" and self._own_ip and row.get("ip") == self._own_ip:
                     continue
 
             visible.append(row)
@@ -1099,59 +1324,12 @@ class MonitorApp(QMainWindow):
                 f"Actualisation dans {self._countdown}s — {ts}"
             )
 
-    # ── Redimensionnement sans bords natifs ───────────────────────────────
-
-    _RB = 6
-    _EC = {
-        "n":  Qt.CursorShape.SizeVerCursor,   "s":  Qt.CursorShape.SizeVerCursor,
-        "e":  Qt.CursorShape.SizeHorCursor,   "w":  Qt.CursorShape.SizeHorCursor,
-        "ne": Qt.CursorShape.SizeBDiagCursor, "sw": Qt.CursorShape.SizeBDiagCursor,
-        "nw": Qt.CursorShape.SizeFDiagCursor, "se": Qt.CursorShape.SizeFDiagCursor,
-    }
-    _EQ = {
-        "n":  Qt.Edge.TopEdge,    "s": Qt.Edge.BottomEdge,
-        "e":  Qt.Edge.RightEdge,  "w": Qt.Edge.LeftEdge,
-        "ne": Qt.Edge.TopEdge  | Qt.Edge.RightEdge,
-        "nw": Qt.Edge.TopEdge  | Qt.Edge.LeftEdge,
-        "se": Qt.Edge.BottomEdge | Qt.Edge.RightEdge,
-        "sw": Qt.Edge.BottomEdge | Qt.Edge.LeftEdge,
-    }
-
-    def _edge(self, lp):
-        x, y, w, h, B = lp.x(), lp.y(), self.width(), self.height(), self._RB
-        L, R, T, Bo = x < B, x > w - B, y < B, y > h - B
-        if T and L: return "nw"
-        if T and R: return "ne"
-        if Bo and L: return "sw"
-        if Bo and R: return "se"
-        if T: return "n"
-        if Bo: return "s"
-        if L: return "w"
-        if R: return "e"
-        return None
-
-    def installEventFilter(self, obj): super().installEventFilter(obj)
-
-    def eventFilter(self, _obj, ev):
-        t = ev.type()
-        if t == QEvent.Type.MouseMove and isinstance(ev, QMouseEvent):
-            edge = self._edge(self.mapFromGlobal(ev.globalPosition().toPoint()))
-            self.setCursor(QCursor(self._EC[edge])) if edge else self.unsetCursor()
-        elif t == QEvent.Type.MouseButtonPress and isinstance(ev, QMouseEvent):
-            if ev.button() == Qt.MouseButton.LeftButton and not self.isMaximized():
-                edge = self._edge(self.mapFromGlobal(ev.globalPosition().toPoint()))
-                if edge:
-                    h = self.windowHandle()
-                    if h: h.startSystemResize(self._EQ[edge])
-                    return True
-        return False
 
 
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     win = MonitorApp()
-    win.installEventFilter(win)
     win.show()
     sys.exit(app.exec())
 
