@@ -47,8 +47,10 @@ C: dict[str, str] = {
 }
 
 # ── Config ────────────────────────────────────────────────────────────────
-BASE_DIR  = Path(__file__).resolve().parent.parent
-CFG_FILE  = BASE_DIR / "monitor_config.json"
+_frozen    = getattr(sys, "frozen", False)
+BASE_DIR   = Path(sys.executable).parent if _frozen else Path(__file__).resolve().parent.parent
+ASSETS_DIR = (Path(getattr(sys, "_MEIPASS", BASE_DIR)) / "assets") if _frozen else (BASE_DIR / "assets")
+CFG_FILE   = BASE_DIR / "monitor_config.json"
 OVH_URL   = "https://bdc.gersmotopieces.com"
 OVH_KEY   = "gmp_fGPsjgfjk465fdf48ghHQd5Gsq592GAqpdGe4"
 APP_VER   = "1.2.0"
@@ -1002,7 +1004,7 @@ class MonitorApp(QMainWindow):
         self.setWindowTitle("GMP Monitor")
         self.setStyleSheet(f"QMainWindow,QWidget#root{{background:{C['bg']};}}")
 
-        icon_p = BASE_DIR / "assets" / "monitor.ico"
+        icon_p = ASSETS_DIR / "monitor.ico"
         if icon_p.exists(): self.setWindowIcon(QIcon(str(icon_p)))
 
         self._cfg: dict[str, Any] = _load_cfg()
