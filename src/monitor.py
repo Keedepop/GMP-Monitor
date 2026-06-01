@@ -558,6 +558,149 @@ class ApiTrafficCard(QWidget):
             self._ip_lbl.setText("")
 
 
+# ── Graphique historique CPU + RAM ────────────────────────────────────────
+class _MetricsCanvas(QWidget):
+    """Zone de dessin QPainter : CPU% (rouge) + RAM% (ambre) superposés."""
+
+    CPU_CLR = C["red"]
+    RAM_CLR = C["amber"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._data: list[Any] = []
+        self.setStyleSheet("background:transparent;")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_data(self, data: list[Any]):
+        self._data = data
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        W, H = self.width(), self.height()
+        ML, MR, MT, MB = 38, 12, 8, 36
+        CW = W - ML - MR
+        CH = H - MT - MB
+
+        if not self._data or CW < 10 or CH < 10:
+            p.setPen(QColor(C["dim"]))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                       "En attente du premier sample…")
+            p.end(); return
+
+        data = self._data
+        if len(data) > CW:
+            step = len(data) / CW
+            data = [data[int(i * step)] for i in range(int(CW))]
+        n = len(data)
+
+        cpu_vals = [d.get("cpu", 0) for d in data]
+        ram_vals = [d.get("ram", 0) for d in data]
+        scale    = 100.0  # axe fixe 0-100 %
+
+        # ── grille + labels Y (0 / 25 / 50 / 75 / 100 %) ─────────────
+        p.setFont(QFont("Consolas", 7))
+        for pct in (0, 25, 50, 75, 100):
+            gy = MT + int(CH * (1 - pct / 100))
+            p.setPen(QPen(QColor(C["border"]), 1, Qt.PenStyle.DotLine))
+            p.drawLine(ML, gy, ML + CW, gy)
+            p.setPen(QColor(C["muted"]))
+            p.drawText(0, gy - 9, ML - 4, 18,
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       f"{pct}%")
+
+        p.setPen(QPen(QColor(C["border"]), 1))
+        p.drawLine(ML, MT, ML, MT + CH)
+
+        def _area(vals: list[float]) -> QPolygonF:
+            pts = [QPointF(ML + CW * i / max(n - 1, 1),
+                           MT + CH - CH * min(v / scale, 1.0))
+                   for i, v in enumerate(vals)]
+            pts += [QPointF(ML + CW, MT + CH), QPointF(ML, MT + CH)]
+            return QPolygonF(pts)
+
+        def _line(vals: list[float], color: str):
+            path = QPainterPath()
+            for i, v in enumerate(vals):
+                x = ML + CW * i / max(n - 1, 1)
+                y = MT + CH - CH * min(v / scale, 1.0)
+                if i == 0: path.moveTo(x, y)
+                else:      path.lineTo(x, y)
+            p.setPen(QPen(QColor(color), 1.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+
+        for vals, clr in [(ram_vals, self.RAM_CLR), (cpu_vals, self.CPU_CLR)]:
+            fill = QColor(clr); fill.setAlpha(35)
+            p.setBrush(fill); p.setPen(Qt.PenStyle.NoPen)
+            p.drawPolygon(_area(vals))
+            _line(vals, clr)
+
+        # ── labels X ──────────────────────────────────────────────────
+        N_TICKS = min(6, n - 1)
+        p.setPen(QColor(C["muted"]))
+        p.setFont(QFont("Consolas", 7))
+        for i in range(N_TICKS + 1):
+            idx = int(i * (n - 1) / N_TICKS)
+            x   = ML + int(CW * idx / max(n - 1, 1))
+            ts  = data[idx].get("ts", "")
+            try:
+                dt      = datetime.datetime.fromisoformat(ts)
+                lbl_txt = dt.strftime("%d/%m %H:%M")
+            except Exception:
+                lbl_txt = ts[-11:] if len(ts) >= 11 else ts
+            p.drawText(x - 32, H - MB + 3, 64, 16,
+                       Qt.AlignmentFlag.AlignHCenter, lbl_txt)
+        p.end()
+
+
+class MetricsHistoryCard(QWidget):
+    """Carte historique CPU + RAM — plage partagée avec TrafficHistoryCard."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(
+            f"background:{C['surface']};border:1px solid {C['border']};border-radius:8px;"
+        )
+        self.setFixedHeight(220)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 8)
+        lay.setSpacing(6)
+
+        head = QWidget(); head.setStyleSheet("background:transparent;")
+        hh   = QHBoxLayout(head); hh.setContentsMargins(0, 0, 0, 0); hh.setSpacing(8)
+        hh.addWidget(lbl("CPU + RAM — HISTORIQUE", size=10, bold=True, color=C["dim"]))
+        hh.addStretch()
+        for color, label in [(_MetricsCanvas.CPU_CLR, "CPU"),
+                              (_MetricsCanvas.RAM_CLR, "RAM")]:
+            dot = QWidget(); dot.setFixedSize(10, 10)
+            dot.setStyleSheet(f"background:{color};border-radius:2px;")
+            hh.addWidget(dot)
+            hh.addWidget(lbl(label, size=9, color=C["dim"]))
+            hh.addSpacing(4)
+        lay.addWidget(head)
+
+        self._canvas = _MetricsCanvas(self)
+        lay.addWidget(self._canvas, stretch=1)
+
+        self._stats_lbl = lbl("", size=8, mono=True, color=C["muted"])
+        lay.addWidget(self._stats_lbl)
+
+    def set_data(self, data: list[Any]):
+        self._canvas.set_data(data)
+        if data:
+            cpu_max = max((d.get("cpu", 0) for d in data), default=0)
+            ram_max = max((d.get("ram", 0) for d in data), default=0)
+            self._stats_lbl.setText(
+                f"{len(data)} samples  ·  CPU max {cpu_max:.1f}%  ·  RAM max {ram_max:.1f}%"
+            )
+        else:
+            self._stats_lbl.setText("En attente du premier sample (60 s après démarrage)…")
+
+
 # ── Graphique historique trafic réseau ────────────────────────────────────
 class _TrafficCanvas(QWidget):
     """Zone de dessin QPainter pour le graphique trafic (aire double)."""
@@ -997,28 +1140,28 @@ class MonitorApp(QMainWindow):
         gl.addWidget(self._card_disk,   0, 2)
         gl.addWidget(self._card_status, 0, 3)
 
-        # Ligne 1 : BASE DE DONNÉES (2 cols) · TRAFIC API (2 cols)
+        # Objets conservés mais non affichés (calculs internes)
         self._card_db      = self._make_db_card()
-        self._card_network = NetworkCard()   # conservé pour les calculs de débit, non affiché
+        self._card_network = NetworkCard()
         self._card_traffic = ApiTrafficCard()
-        gl.addWidget(self._card_db,      1, 0, 1, 2)
-        gl.addWidget(self._card_traffic, 1, 2, 1, 2)
 
-        # Ligne 2 : Historique trafic réseau (4 cols, pleine largeur)
+        # Ligne 1 : CPU+RAM historique (2 cols) · Réseau historique (2 cols)
+        self._card_metrics_history = MetricsHistoryCard()
         self._card_traffic_history = TrafficHistoryCard(
             on_range_change=self._on_traffic_range_change
         )
-        gl.addWidget(self._card_traffic_history, 2, 0, 1, 4)
+        self._card_traffic_history.setFixedHeight(220)
+        gl.addWidget(self._card_metrics_history, 1, 0, 1, 2)
+        gl.addWidget(self._card_traffic_history,  1, 2, 1, 2)
 
-        # Ligne 3 : Journal d'accès (4 cols, prend tout l'espace restant)
+        # Ligne 2 : Journal d'accès (4 cols, prend tout l'espace restant)
         self._card_log = self._make_log_card()
-        gl.addWidget(self._card_log, 3, 0, 1, 4)
+        gl.addWidget(self._card_log, 2, 0, 1, 4)
 
         for col in range(4): gl.setColumnStretch(col, 1)
         gl.setRowStretch(0, 0)
         gl.setRowStretch(1, 0)
-        gl.setRowStretch(2, 0)
-        gl.setRowStretch(3, 1)
+        gl.setRowStretch(2, 1)
 
         lay.addWidget(grid, stretch=1)
 
@@ -1408,10 +1551,12 @@ class MonitorApp(QMainWindow):
 
         self._card_traffic.update_from_logs(list(self._log_history))
 
-        # ── Historique trafic réseau ───────────────────────────────────────
+        # ── Historiques trafic + CPU/RAM ──────────────────────────────────────
         traf_ = data.get("traffic", {})
         if traf_.get("ok"):
-            self._card_traffic_history.set_data(traf_.get("data", []))
+            samples = traf_.get("data", [])
+            self._card_traffic_history.set_data(samples)
+            self._card_metrics_history.set_data(samples)
 
     def _on_error(self, err: str):
         self._title_bar.set_status(False, f"Erreur : {err[:80]}")
