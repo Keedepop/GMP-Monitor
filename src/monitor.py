@@ -1131,13 +1131,12 @@ class MonitorApp(QMainWindow):
         grid = QWidget(); grid.setStyleSheet("background:transparent;")
         gl = QGridLayout(grid); gl.setContentsMargins(0, 0, 0, 0); gl.setSpacing(10)
 
-        # Ligne 0 : STOCKAGE (2 cols) · STATUT (2 cols)
+        # Ligne 0 : STATUT (pleine largeur)
         self._card_cpu    = MetricCard("CPU", graph_color=C["red"])    # non affiché
         self._card_ram    = MetricCard("RAM", graph_color=C["amber"])  # non affiché
-        self._card_disk   = DiskCard()
+        self._card_disk   = DiskCard()                                  # non affiché
         self._card_status = self._make_status_card()
-        gl.addWidget(self._card_disk,   0, 0, 1, 2)
-        gl.addWidget(self._card_status, 0, 2, 1, 2)
+        gl.addWidget(self._card_status, 0, 0, 1, 4)
 
         # Objets conservés mais non affichés (calculs internes)
         self._card_db      = self._make_db_card()
@@ -1165,48 +1164,60 @@ class MonitorApp(QMainWindow):
         lay.addWidget(grid, stretch=1)
 
     def _make_status_card(self) -> QWidget:
+        """Barre de statut horizontale compacte (pleine largeur)."""
         card = QWidget()
         card.setStyleSheet(
             f"background:{C['surface']};border:1px solid {C['border']};border-radius:8px;"
         )
-        cv = QVBoxLayout(card); cv.setContentsMargins(16, 12, 16, 12); cv.setSpacing(6)
-        cv.addWidget(lbl("STATUT SERVEUR", size=10, bold=True, color=C["dim"]))
-        cv.addWidget(sep())
+        card.setFixedHeight(42)
+        h = QHBoxLayout(card); h.setContentsMargins(14, 0, 14, 0); h.setSpacing(0)
 
-        def _row(k, w):
-            r  = QWidget(); r.setStyleSheet("background:transparent;")
-            rh = QHBoxLayout(r); rh.setContentsMargins(0, 0, 0, 0); rh.setSpacing(8)
-            rh.addWidget(lbl(k, size=9, color=C["dim"]))
-            rh.addStretch()
-            rh.addWidget(w)
-            return r
+        def _stat(key: str, val_lbl: QLabel) -> QWidget:
+            w = QWidget(); w.setStyleSheet("background:transparent;")
+            v = QHBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(5)
+            v.addWidget(lbl(key, size=8, color=C["muted"]))
+            v.addWidget(val_lbl)
+            return w
 
-        self._st_uptime_srv = lbl("—", size=10, mono=True)
-        self._st_uptime_api = lbl("—", size=10, mono=True)
-        self._st_load       = lbl("—", size=10, mono=True)
-        self._st_ping       = lbl("—", size=10, mono=True)
-        self._st_requests   = lbl("—", size=10, mono=True)
-        self._st_version    = lbl("—", size=10, mono=True)
+        def _vsep() -> QFrame:
+            f = QFrame()
+            f.setFrameShape(QFrame.Shape.VLine)
+            f.setStyleSheet(f"color:{C['border']};")
+            f.setFixedWidth(1)
+            return f
 
-        cv.addWidget(_row("Uptime serveur",   self._st_uptime_srv))
-        cv.addWidget(_row("Uptime API",       self._st_uptime_api))
-        cv.addWidget(_row("Charge 1m",        self._st_load))
-        cv.addWidget(_row("Latence API",      self._st_ping))
-        cv.addWidget(_row("Requêtes loggées", self._st_requests))
-        cv.addWidget(_row("Dernière version", self._st_version))
-        self._st_ver_notes = lbl("", size=8, color=C["muted"])
-        self._st_ver_notes.setWordWrap(True)
-        cv.addWidget(self._st_ver_notes)
+        self._st_uptime_srv = lbl("—", size=9, mono=True)
+        self._st_uptime_api = lbl("—", size=9, mono=True)
+        self._st_load       = lbl("—", size=9, mono=True)
+        self._st_ping       = lbl("—", size=9, mono=True)
+        self._st_requests   = lbl("—", size=9, mono=True)
+        self._st_version    = lbl("—", size=9, mono=True)
+        self._st_ver_notes  = lbl("", size=8, color=C["muted"])  # garde pour compat
 
-        cv.addWidget(sep())
-        cv.addWidget(lbl("SÉCURITÉ", size=9, bold=True, color=C["dim"]))
-        self._sec_https   = lbl("⚠  HTTP — communication non chiffrée", size=9, color=C["amber"])
-        self._sec_openapi = lbl("⚠  /openapi.json accessible sans auth", size=9, color=C["amber"])
-        self._sec_auth    = lbl("✓  Auth X-API-Key sur toutes les routes", size=9, color=C["green"])
-        cv.addWidget(self._sec_https)
-        cv.addWidget(self._sec_openapi)
-        cv.addWidget(self._sec_auth)
-        cv.addStretch()
+        self._sec_https   = lbl("⚠ HTTP", size=8, color=C["amber"])
+        self._sec_openapi = lbl("⚠ /openapi", size=8, color=C["amber"])
+        self._sec_auth    = lbl("✓ Auth", size=8, color=C["green"])
+
+        for w in [
+            _stat("Uptime srv", self._st_uptime_srv), _vsep(),
+            _stat("Uptime API", self._st_uptime_api), _vsep(),
+            _stat("Charge",     self._st_load),        _vsep(),
+            _stat("Latence",    self._st_ping),         _vsep(),
+            _stat("Requêtes",   self._st_requests),     _vsep(),
+            _stat("Version",    self._st_version),
+        ]:
+            h.addWidget(w)
+            if not isinstance(w, QFrame):
+                h.addSpacing(10)
+
+        h.addStretch()
+
+        for sec in (self._sec_https, self._sec_openapi, self._sec_auth):
+            h.addSpacing(10)
+            h.addWidget(_vsep())
+            h.addSpacing(10)
+            h.addWidget(sec)
+
         return card
 
     def _make_db_card(self) -> QWidget:
