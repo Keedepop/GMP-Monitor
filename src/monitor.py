@@ -20,9 +20,10 @@ from PyQt6.QtWidgets import (
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QSizePolicy, QLineEdit,
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPointF
 from PyQt6.QtGui import (
     QFont, QCursor, QColor, QPainter, QPen, QIcon,
+    QPolygonF, QPainterPath, QLinearGradient,
 )
 
 # ── Palette identique V5 ──────────────────────────────────────────────────
@@ -53,7 +54,7 @@ OVH_KEY   = "gmp_fGPsjgfjk465fdf48ghHQd5Gsq592GAqpdGe4"
 APP_VER   = "1.2.0"
 REFRESH_S = 30
 
-def _load_cfg() -> dict:
+def _load_cfg() -> dict[str, Any]:
     try:
         if CFG_FILE.exists():
             return json.loads(CFG_FILE.read_text(encoding="utf-8"))
@@ -61,7 +62,7 @@ def _load_cfg() -> dict:
         pass
     return {"url": OVH_URL, "key": OVH_KEY}
 
-def _save_cfg(d: dict):
+def _save_cfg(d: dict[str, Any]):
     try:
         CFG_FILE.write_text(json.dumps(d, indent=2), encoding="utf-8")
     except Exception:
@@ -105,6 +106,23 @@ def _fmt_uptime(s: int) -> str:
     if m: parts.append(f"{m}m")
     parts.append(f"{s}s")
     return " ".join(parts[:3])
+
+def _fmt_bps(bps: float) -> str:
+    """Formate un débit en bits/s lisible (K / M / G)."""
+    for unit in ("o/s", "Ko/s", "Mo/s", "Go/s"):
+        if bps < 1024: return f"{bps:.1f} {unit}"
+        bps /= 1024
+    return f"{bps:.1f} Go/s"
+
+def _nice_scale(max_val: float) -> float:
+    """Arrondit vers le haut pour une échelle graphique lisible."""
+    import math
+    if max_val <= 0: return 1.0
+    mag = 10 ** math.floor(math.log10(max_val))
+    for mult in (1, 2, 5, 10):
+        if mag * mult >= max_val:
+            return float(mag * mult)
+    return float(mag * 10)
 
 # ── Worker thread ─────────────────────────────────────────────────────────
 class Worker(QThread):
@@ -540,6 +558,213 @@ class ApiTrafficCard(QWidget):
             self._ip_lbl.setText("")
 
 
+# ── Graphique historique trafic réseau ────────────────────────────────────
+class _TrafficCanvas(QWidget):
+    """Zone de dessin QPainter pour le graphique trafic (aire double)."""
+
+    _TX_CLR = "#4fc3f7"   # sortant — bleu clair
+    _RX_CLR = "#f9a825"   # entrant — ambre
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._data: list[Any] = []
+        self.setStyleSheet("background:transparent;")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_data(self, data: list[Any]):
+        self._data = data
+        self.update()
+
+    # ── dessin ──────────────────────────────────────────────────────────
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        W, H = self.width(), self.height()
+        ML, MR, MT, MB = 62, 12, 8, 36   # marges (gauche, droite, haut, bas)
+        CW = W - ML - MR
+        CH = H - MT - MB
+
+        if not self._data or CW < 10 or CH < 10:
+            p.setPen(QColor(C["dim"]))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Aucune donnée — en attente de samples…")
+            p.end(); return
+
+        # ── downsample si beaucoup de points ──────────────────────────
+        data = self._data
+        if len(data) > CW:
+            step = len(data) / CW
+            data = [data[int(i * step)] for i in range(int(CW))]
+        n = len(data)
+
+        tx_vals = [d.get("tx_bps", 0) for d in data]
+        rx_vals = [d.get("rx_bps", 0) for d in data]
+        max_val = max(max(tx_vals, default=0), max(rx_vals, default=0))
+        scale   = _nice_scale(max_val) if max_val > 0 else 1.0
+
+        # ── grille horizontale + labels Y ─────────────────────────────
+        N_GRID = 4
+        p.setFont(QFont("Consolas", 7))
+        for i in range(N_GRID + 1):
+            gy  = MT + CH - int(CH * i / N_GRID)
+            val = scale * i / N_GRID
+            # ligne pointillée
+            p.setPen(QPen(QColor(C["border"]), 1, Qt.PenStyle.DotLine))
+            p.drawLine(ML, gy, ML + CW, gy)
+            # label
+            p.setPen(QColor(C["muted"]))
+            txt = _fmt_bps(val)
+            p.drawText(0, gy - 9, ML - 5, 18,
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, txt)
+
+        # ── axe vertical gauche ───────────────────────────────────────
+        p.setPen(QPen(QColor(C["border"]), 1))
+        p.drawLine(ML, MT, ML, MT + CH)
+
+        # ── fonction : construire le polygone d'aire ──────────────────
+        def _area_polygon(vals: list[float]) -> QPolygonF:
+            pts = []
+            for i, v in enumerate(vals):
+                x = ML + CW * i / max(n - 1, 1)
+                y = MT + CH - CH * min(v / scale, 1.0)
+                pts.append(QPointF(x, y))
+            # fermer vers le bas
+            pts.append(QPointF(ML + CW, MT + CH))
+            pts.append(QPointF(ML,      MT + CH))
+            return QPolygonF(pts)
+
+        # ── fonction : tracer la ligne supérieure ─────────────────────
+        def _draw_line(vals: list[float], color: str):
+            path = QPainterPath()
+            for i, v in enumerate(vals):
+                x = ML + CW * i / max(n - 1, 1)
+                y = MT + CH - CH * min(v / scale, 1.0)
+                if i == 0: path.moveTo(x, y)
+                else:      path.lineTo(x, y)
+            p.setPen(QPen(QColor(color), 1.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+
+        # ── sortant (TX) ─────────────────────────────────────────────
+        fill_tx = QColor(self._TX_CLR); fill_tx.setAlpha(45)
+        p.setBrush(fill_tx); p.setPen(Qt.PenStyle.NoPen)
+        p.drawPolygon(_area_polygon(tx_vals))
+        _draw_line(tx_vals, self._TX_CLR)
+
+        # ── entrant (RX) ─────────────────────────────────────────────
+        fill_rx = QColor(self._RX_CLR); fill_rx.setAlpha(45)
+        p.setBrush(fill_rx); p.setPen(Qt.PenStyle.NoPen)
+        p.drawPolygon(_area_polygon(rx_vals))
+        _draw_line(rx_vals, self._RX_CLR)
+
+        # ── labels X (timestamps) ────────────────────────────────────
+        N_TICKS = min(8, n - 1)
+        p.setPen(QColor(C["muted"]))
+        p.setFont(QFont("Consolas", 7))
+        for i in range(N_TICKS + 1):
+            idx = int(i * (n - 1) / N_TICKS)
+            x   = ML + int(CW * idx / max(n - 1, 1))
+            ts  = data[idx].get("ts", "")
+            try:
+                dt  = datetime.datetime.fromisoformat(ts)
+                lbl_txt = dt.strftime("%d/%m %H:%M")
+            except Exception:
+                lbl_txt = ts[-11:] if len(ts) >= 11 else ts
+            p.drawText(x - 32, H - MB + 3, 64, 16,
+                       Qt.AlignmentFlag.AlignHCenter, lbl_txt)
+
+        p.end()
+
+
+class TrafficHistoryCard(QWidget):
+    """Carte pleine largeur : historique trafic entrant / sortant."""
+
+    _RANGES = [("6h", 6), ("24h", 24), ("48h", 48), ("7j", 168)]
+
+    def __init__(self, on_range_change, parent=None):
+        super().__init__(parent)
+        self._on_range = on_range_change
+        self._hours    = 24
+        self.setStyleSheet(
+            f"background:{C['surface']};border:1px solid {C['border']};border-radius:8px;"
+        )
+        self.setFixedHeight(270)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 8)
+        lay.setSpacing(6)
+
+        # ── en-tête ──────────────────────────────────────────────────
+        head = QWidget(); head.setStyleSheet("background:transparent;")
+        hh   = QHBoxLayout(head); hh.setContentsMargins(0, 0, 0, 0); hh.setSpacing(8)
+
+        hh.addWidget(lbl("TRAFIC RÉSEAU — HISTORIQUE", size=10, bold=True, color=C["dim"]))
+        hh.addStretch()
+
+        # Légende
+        for color, label in [(_TrafficCanvas._RX_CLR, "Entrant"),
+                              (_TrafficCanvas._TX_CLR, "Sortant")]:
+            dot = QWidget(); dot.setFixedSize(10, 10)
+            dot.setStyleSheet(f"background:{color};border-radius:2px;")
+            hh.addWidget(dot)
+            hh.addWidget(lbl(label, size=9, color=C["dim"]))
+            hh.addSpacing(4)
+
+        hh.addSpacing(8)
+
+        # Boutons plage
+        _btn_ss = (
+            f"QPushButton{{background:transparent;color:{C['dim']};border:1px solid {C['border2']};"
+            f"border-radius:3px;padding:1px 7px;font-size:8px;font-family:Consolas;}}"
+            f"QPushButton:checked{{background:{C['red_dim']};color:{C['text']};"
+            f"border-color:{C['red_dim']};}}"
+            f"QPushButton:hover{{border-color:{C['border']};}}"
+        )
+        self._range_btns = []
+        for label, hours in self._RANGES:
+            b = QPushButton(label)
+            b.setFixedHeight(20); b.setCheckable(True)
+            b.setStyleSheet(_btn_ss)
+            b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            b.clicked.connect(lambda _, h=hours, btn=b: self._select_range(h, btn))
+            self._range_btns.append(b)
+            hh.addWidget(b)
+        self._range_btns[1].setChecked(True)   # 24h par défaut
+
+        lay.addWidget(head)
+
+        # ── canvas ───────────────────────────────────────────────────
+        self._canvas = _TrafficCanvas(self)
+        lay.addWidget(self._canvas, stretch=1)
+
+        # ── ligne de stats ────────────────────────────────────────────
+        self._stats_lbl = lbl("", size=8, mono=True, color=C["muted"])
+        lay.addWidget(self._stats_lbl)
+
+    def _select_range(self, hours: int, btn: QPushButton):
+        self._hours = hours
+        for b in self._range_btns:
+            b.setChecked(b is btn)
+        self._on_range(hours)
+
+    def set_data(self, data: list[Any]):
+        self._canvas.set_data(data)
+        if data:
+            tx_max = max((d.get("tx_bps", 0) for d in data), default=0)
+            rx_max = max((d.get("rx_bps", 0) for d in data), default=0)
+            self._stats_lbl.setText(
+                f"{len(data)} samples  ·  "
+                f"Sortant max {_fmt_bps(tx_max)}  ·  "
+                f"Entrant max {_fmt_bps(rx_max)}"
+            )
+        else:
+            self._stats_lbl.setText("En attente du premier sample (60 s après démarrage)…")
+
+    @property
+    def hours(self) -> int:
+        return self._hours
+
+
 # ── TitleBar ──────────────────────────────────────────────────────────────
 class TitleBar(QWidget):
     def __init__(self, parent: "MonitorApp"):
@@ -637,7 +862,7 @@ class MonitorApp(QMainWindow):
         icon_p = BASE_DIR / "assets" / "monitor.ico"
         if icon_p.exists(): self.setWindowIcon(QIcon(str(icon_p)))
 
-        self._cfg       = _load_cfg()
+        self._cfg: dict[str, Any] = _load_cfg()
         self._workers   : list[QThread] = []
         self._refresh_s = REFRESH_S
         self._countdown = self._refresh_s
@@ -659,6 +884,9 @@ class MonitorApp(QMainWindow):
         self._prev_net_sent: int | None = None
         self._prev_net_recv: int | None = None
         self._prev_net_time: float = 0.0
+
+        # Plage sélectionnée pour l'historique trafic
+        self._traffic_hours: int = 24
 
         root = QWidget(); root.setObjectName("root")
         self.setCentralWidget(root)
@@ -769,7 +997,7 @@ class MonitorApp(QMainWindow):
         gl.addWidget(self._card_disk,   0, 2)
         gl.addWidget(self._card_status, 0, 3)
 
-        # Ligne 1 : BASE DE DONNÉES (2 cols) · RÉSEAU (2 cols)
+        # Ligne 1 : BASE DE DONNÉES (2 cols) · RÉSEAU (1 col) · TRAFIC API (1 col)
         self._card_db      = self._make_db_card()
         self._card_network = NetworkCard()
         self._card_traffic = ApiTrafficCard()
@@ -777,14 +1005,21 @@ class MonitorApp(QMainWindow):
         gl.addWidget(self._card_network, 1, 2, 1, 1)
         gl.addWidget(self._card_traffic, 1, 3, 1, 1)
 
-        # Ligne 2 : Journal d'accès (4 cols, prend tout l'espace restant)
+        # Ligne 2 : Historique trafic réseau (4 cols, pleine largeur)
+        self._card_traffic_history = TrafficHistoryCard(
+            on_range_change=self._on_traffic_range_change
+        )
+        gl.addWidget(self._card_traffic_history, 2, 0, 1, 4)
+
+        # Ligne 3 : Journal d'accès (4 cols, prend tout l'espace restant)
         self._card_log = self._make_log_card()
-        gl.addWidget(self._card_log, 2, 0, 1, 4)
+        gl.addWidget(self._card_log, 3, 0, 1, 4)
 
         for col in range(4): gl.setColumnStretch(col, 1)
         gl.setRowStretch(0, 0)
         gl.setRowStretch(1, 0)
-        gl.setRowStretch(2, 1)
+        gl.setRowStretch(2, 0)
+        gl.setRowStretch(3, 1)
 
         lay.addWidget(grid, stretch=1)
 
@@ -1038,23 +1273,30 @@ class MonitorApp(QMainWindow):
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read())
 
+    def _on_traffic_range_change(self, hours: int):
+        self._traffic_hours = hours
+        self._refresh()
+
     def _fetch_all(self) -> dict:
-        t0   = time.time()
-        sys_ = self._api("/monitor/system")
-        db_  = self._api("/monitor/db")
-        log_ = self._api("/monitor/access_log", n=200)
-        ver_ = self._api("/version")
-        lat  = round((time.time() - t0) * 1000)
+        t0      = time.time()
+        hours   = self._traffic_hours
+        sys_    = self._api("/monitor/system")
+        db_     = self._api("/monitor/db")
+        log_    = self._api("/monitor/access_log", n=200)
+        ver_    = self._api("/version")
+        traffic_= self._api("/monitor/traffic", extra=f"hours={hours}")
+        lat     = round((time.time() - t0) * 1000)
         # Vérifie si /openapi.json est accessible sans authentification
         openapi_exposed = False
         try:
             url = self._cfg.get("url", OVH_URL).rstrip("/") + "/openapi.json"
-            req = urllib.request.Request(url)  # sans X-API-Key intentionnellement
+            req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=5) as r:
                 openapi_exposed = (r.status == 200)
         except Exception:
             pass
-        return {"sys": sys_, "db": db_, "log": log_, "ver": ver_, "lat_ms": lat,
+        return {"sys": sys_, "db": db_, "log": log_, "ver": ver_,
+                "traffic": traffic_, "lat_ms": lat,
                 "openapi_exposed": openapi_exposed}
 
     def _refresh(self):
@@ -1071,7 +1313,7 @@ class MonitorApp(QMainWindow):
         self._workers.append(w)
         w.start()
 
-    def _on_data(self, data: dict):
+    def _on_data(self, data: dict[str, Any]):
         self._countdown = self._refresh_s
         self._title_bar.set_status(True, "Serveur OVH connecté")
         lat = data.get("lat_ms", 0)
@@ -1167,6 +1409,11 @@ class MonitorApp(QMainWindow):
 
         self._card_traffic.update_from_logs(list(self._log_history))
 
+        # ── Historique trafic réseau ───────────────────────────────────────
+        traf_ = data.get("traffic", {})
+        if traf_.get("ok"):
+            self._card_traffic_history.set_data(traf_.get("data", []))
+
     def _on_error(self, err: str):
         self._title_bar.set_status(False, f"Erreur : {err[:80]}")
         self._title_bar.set_refresh_label(f"Erreur — {err[:60]}")
@@ -1215,7 +1462,7 @@ class MonitorApp(QMainWindow):
         self._workers.append(w)
         w.start()
 
-    def _on_history_data(self, data: dict):
+    def _on_history_data(self, data: dict[str, Any]):
         if not data.get("ok"):
             self._log_count_lbl.setText(f"Erreur historique : {data.get('error','?')}")
             return
