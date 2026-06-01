@@ -1130,15 +1130,13 @@ class MonitorApp(QMainWindow):
         grid = QWidget(); grid.setStyleSheet("background:transparent;")
         gl = QGridLayout(grid); gl.setContentsMargins(0, 0, 0, 0); gl.setSpacing(10)
 
-        # Ligne 0 : CPU · RAM · STOCKAGE · STATUT
-        self._card_cpu    = MetricCard("CPU", graph_color=C["red"])
-        self._card_ram    = MetricCard("RAM", graph_color=C["amber"])
+        # Ligne 0 : STOCKAGE (2 cols) · STATUT (2 cols)
+        self._card_cpu    = MetricCard("CPU", graph_color=C["red"])    # non affiché
+        self._card_ram    = MetricCard("RAM", graph_color=C["amber"])  # non affiché
         self._card_disk   = DiskCard()
         self._card_status = self._make_status_card()
-        gl.addWidget(self._card_cpu,    0, 0)
-        gl.addWidget(self._card_ram,    0, 1)
-        gl.addWidget(self._card_disk,   0, 2)
-        gl.addWidget(self._card_status, 0, 3)
+        gl.addWidget(self._card_disk,   0, 0, 1, 2)
+        gl.addWidget(self._card_status, 0, 2, 1, 2)
 
         # Objets conservés mais non affichés (calculs internes)
         self._card_db      = self._make_db_card()
