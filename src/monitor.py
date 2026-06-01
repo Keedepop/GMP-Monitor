@@ -997,13 +997,12 @@ class MonitorApp(QMainWindow):
         gl.addWidget(self._card_disk,   0, 2)
         gl.addWidget(self._card_status, 0, 3)
 
-        # Ligne 1 : BASE DE DONNÉES (2 cols) · RÉSEAU (1 col) · TRAFIC API (1 col)
+        # Ligne 1 : BASE DE DONNÉES (2 cols) · TRAFIC API (2 cols)
         self._card_db      = self._make_db_card()
-        self._card_network = NetworkCard()
+        self._card_network = NetworkCard()   # conservé pour les calculs de débit, non affiché
         self._card_traffic = ApiTrafficCard()
         gl.addWidget(self._card_db,      1, 0, 1, 2)
-        gl.addWidget(self._card_network, 1, 2, 1, 1)
-        gl.addWidget(self._card_traffic, 1, 3, 1, 1)
+        gl.addWidget(self._card_traffic, 1, 2, 1, 2)
 
         # Ligne 2 : Historique trafic réseau (4 cols, pleine largeur)
         self._card_traffic_history = TrafficHistoryCard(
