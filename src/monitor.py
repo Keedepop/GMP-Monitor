@@ -664,7 +664,7 @@ class MetricsHistoryCard(QWidget):
         self.setStyleSheet(
             f"background:{C['surface']};border:1px solid {C['border']};border-radius:8px;"
         )
-        self.setFixedHeight(220)
+        self.setFixedHeight(160)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 8)
@@ -831,7 +831,7 @@ class TrafficHistoryCard(QWidget):
         self.setStyleSheet(
             f"background:{C['surface']};border:1px solid {C['border']};border-radius:8px;"
         )
-        self.setFixedHeight(270)
+        self.setFixedHeight(160)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 8)
@@ -1048,7 +1048,8 @@ class MonitorApp(QMainWindow):
         self._timer.timeout.connect(self._tick)
         self._timer.start(1000)
 
-        QTimer.singleShot(200, self._refresh)
+        QTimer.singleShot(200,  self._refresh)
+        QTimer.singleShot(1500, self._load_history)   # journal pré-rempli au démarrage
 
     # ── Construction UI ───────────────────────────────────────────────────
 
@@ -1148,7 +1149,7 @@ class MonitorApp(QMainWindow):
         self._card_traffic_history = TrafficHistoryCard(
             on_range_change=self._on_traffic_range_change
         )
-        self._card_traffic_history.setFixedHeight(220)
+        self._card_traffic_history.setFixedHeight(160)
         gl.addWidget(self._card_metrics_history, 1, 0, 1, 2)
         gl.addWidget(self._card_traffic_history,  1, 2, 1, 2)
 
