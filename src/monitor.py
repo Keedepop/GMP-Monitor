@@ -664,7 +664,7 @@ class MetricsHistoryCard(QWidget):
         self.setStyleSheet(
             f"background:{C['surface']};border:1px solid {C['border']};border-radius:8px;"
         )
-        self.setFixedHeight(160)
+        self.setMinimumHeight(180)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 8)
@@ -831,7 +831,7 @@ class TrafficHistoryCard(QWidget):
         self.setStyleSheet(
             f"background:{C['surface']};border:1px solid {C['border']};border-radius:8px;"
         )
-        self.setFixedHeight(160)
+        self.setMinimumHeight(180)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 8)
@@ -1149,18 +1149,18 @@ class MonitorApp(QMainWindow):
         self._card_traffic_history = TrafficHistoryCard(
             on_range_change=self._on_traffic_range_change
         )
-        self._card_traffic_history.setFixedHeight(160)
         gl.addWidget(self._card_metrics_history, 1, 0, 1, 2)
         gl.addWidget(self._card_traffic_history,  1, 2, 1, 2)
 
-        # Ligne 2 : Journal d'accès (4 cols, prend tout l'espace restant)
+        # Ligne 2 : Journal d'accès (dépliant)
         self._card_log = self._make_log_card()
         gl.addWidget(self._card_log, 2, 0, 1, 4)
 
+        self._grid_layout = gl
         for col in range(4): gl.setColumnStretch(col, 1)
         gl.setRowStretch(0, 0)
-        gl.setRowStretch(1, 0)
-        gl.setRowStretch(2, 1)
+        gl.setRowStretch(1, 2)   # graphiques — grande portion
+        gl.setRowStretch(2, 3)   # journal ouvert — encore plus grand
 
         lay.addWidget(grid, stretch=1)
 
@@ -1248,11 +1248,25 @@ class MonitorApp(QMainWindow):
         card.setStyleSheet(
             f"background:{C['surface']};border:1px solid {C['border']};border-radius:8px;"
         )
-        cv = QVBoxLayout(card); cv.setContentsMargins(16, 12, 16, 12); cv.setSpacing(6)
+        cv = QVBoxLayout(card); cv.setContentsMargins(16, 10, 16, 10); cv.setSpacing(4)
 
-        # En-tête
+        # ── En-tête ───────────────────────────────────────────────────────
         hdr = QWidget(); hdr.setStyleSheet("background:transparent;")
         hh  = QHBoxLayout(hdr); hh.setContentsMargins(0, 0, 0, 0); hh.setSpacing(6)
+
+        # Bouton dépliant ▲/▼
+        self._log_toggle_btn = QPushButton("▲")
+        self._log_toggle_btn.setFixedSize(22, 22)
+        self._log_toggle_btn.setStyleSheet(
+            f"QPushButton{{background:{C['surface2']};color:{C['dim']};"
+            f"border:1px solid {C['border']};border-radius:3px;font-size:10px;font-weight:700;}}"
+            f"QPushButton:hover{{color:{C['text']};}}"
+        )
+        self._log_toggle_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._log_toggle_btn.setToolTip("Replier / déplier le journal")
+        self._log_toggle_btn.clicked.connect(self._toggle_journal)
+        hh.addWidget(self._log_toggle_btn)
+
         hh.addWidget(lbl("JOURNAL D'ACCÈS API", size=10, bold=True, color=C["dim"]))
         hh.addSpacing(8)
         self._log_count_lbl = lbl("", size=9, mono=True, color=C["muted"])
@@ -1331,9 +1345,6 @@ class MonitorApp(QMainWindow):
         clear_search_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         clear_search_btn.clicked.connect(lambda: self._log_search.clear())
         sh.addWidget(clear_search_btn)
-        cv.addWidget(search_row)
-
-        cv.addWidget(sep())
 
         self._log_table = QTableWidget(0, 6)
         self._log_table.setHorizontalHeaderLabels(
@@ -1364,7 +1375,16 @@ class MonitorApp(QMainWindow):
             QTableWidget::item {{padding:2px 8px;border-bottom:1px solid {C['border']};}}
             QTableWidget::item:selected {{background:{C['surface2']};}}
         """)
-        cv.addWidget(self._log_table)
+
+        # Contenu dépliant (recherche + table)
+        self._log_body = QWidget(); self._log_body.setStyleSheet("background:transparent;")
+        bv = QVBoxLayout(self._log_body); bv.setContentsMargins(0, 4, 0, 0); bv.setSpacing(4)
+        bv.addWidget(search_row)
+        bv.addWidget(sep())
+        bv.addWidget(self._log_table)
+
+        cv.addWidget(self._log_body)
+        self._log_journal_collapsed = False
         return card
 
     # ── Fetch / données ───────────────────────────────────────────────────
@@ -1379,6 +1399,20 @@ class MonitorApp(QMainWindow):
         visible = not self._settings_panel.isVisible()
         self._settings_panel.setVisible(visible)
         self._title_bar._cfg_btn.setChecked(visible)
+
+    def _toggle_journal(self):
+        self._log_journal_collapsed = not self._log_journal_collapsed
+        collapsed = self._log_journal_collapsed
+        self._log_body.setVisible(not collapsed)
+        self._log_toggle_btn.setText("▼" if collapsed else "▲")
+        if collapsed:
+            self._grid_layout.setRowStretch(1, 1)   # graphiques : tout l'espace
+            self._grid_layout.setRowStretch(2, 0)   # journal : juste le header
+            self._card_log.setMaximumHeight(44)
+        else:
+            self._grid_layout.setRowStretch(1, 2)   # graphiques : 2/5
+            self._grid_layout.setRowStretch(2, 3)   # journal : 3/5
+            self._card_log.setMaximumHeight(16_777_215)
 
     def _toggle_always_on_top(self):
         self._always_on_top = not self._always_on_top
