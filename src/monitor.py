@@ -1013,8 +1013,8 @@ class MonitorApp(QMainWindow):
         self._countdown = self._refresh_s
 
         # Historique cumulatif des logs de session
-        self._log_history : collections.deque = collections.deque(maxlen=1000)
-        self._log_seen    : set = set()        # clés (ts, ip, method, path) déjà vues
+        self._log_history : collections.deque[Any] = collections.deque(maxlen=5000)
+        self._log_seen    : set[Any] = set()   # clés (ts, ip, method, path) déjà vues
         self._log_filter  : str = "all"
         self._log_new_count: int = 0
         self._openapi_exposed: bool = True  # mis à jour au 1er fetch
@@ -1610,20 +1610,20 @@ class MonitorApp(QMainWindow):
 
     # ── Journal cumulatif ─────────────────────────────────────────────────
 
-    def _ingest_log_entries(self, rows: list):
+    # Appels internes du monitor — filtrés avant stockage
+    _LOG_SKIP = ("/monitor/", "/version", "/openapi.json", "/favicon")
+
+    def _ingest_log_entries(self, rows: list[Any]):
         new_count = 0
         for row in rows:
-            key = (row.get("ts",""), row.get("ip",""), row.get("method",""), row.get("path",""))
+            path = row.get("path", "")
+            if any(path.startswith(p) for p in self._LOG_SKIP):
+                continue
+            key = (row.get("ts",""), row.get("ip",""), row.get("method",""), path)
             if key not in self._log_seen:
                 self._log_seen.add(key)
-                self._log_history.appendleft(row)   # plus récent en tête
+                self._log_history.appendleft(row)
                 new_count += 1
-        # Détecter l'IP propre du moniteur à partir des entrées /openapi.json déjà loggées
-        if self._own_ip is None:
-            for row in self._log_history:
-                if row.get("path") == "/openapi.json":
-                    self._own_ip = row.get("ip")
-                    break
         self._log_new_count = new_count
         self._render_log_table()
 
@@ -1668,8 +1668,6 @@ class MonitorApp(QMainWindow):
         visible = []
         search = self._log_search.text().strip().lower()
 
-        _MONITOR_PREFIXES = ("/monitor/", "/version")
-
         for row in self._log_history:
             s    = row.get("status", 0)
             path = row.get("path", "")
@@ -1681,20 +1679,13 @@ class MonitorApp(QMainWindow):
             if filt == "err" and not (s >= 400):        continue
 
             # Filtre texte libre
-            haystack = " ".join([
-                row.get("ts",""), row.get("ip",""),
-                row.get("method",""), path,
-                str(s), str(row.get("ms",""))
-            ]).lower()
             if search:
+                haystack = " ".join([
+                    row.get("ts",""), row.get("ip",""),
+                    row.get("method",""), path,
+                    str(s), str(row.get("ms",""))
+                ]).lower()
                 if search not in haystack:
-                    continue
-            else:
-                # Masquer les appels internes du moniteur sauf si recherche active
-                if any(path.startswith(p) for p in _MONITOR_PREFIXES):
-                    continue
-                # Masquer /openapi.json de notre propre IP — les autres IPs restent visibles
-                if path == "/openapi.json" and self._own_ip and row.get("ip") == self._own_ip:
                     continue
 
             visible.append(row)
