@@ -1190,6 +1190,7 @@ class MonitorApp(QMainWindow):
 
         self._st_uptime_srv = lbl("—", size=9, mono=True)
         self._st_uptime_api = lbl("—", size=9, mono=True)
+        self._st_uptime_bdc = lbl("—", size=9, mono=True)
         self._st_load       = lbl("—", size=9, mono=True)
         self._st_ping       = lbl("—", size=9, mono=True)
         self._st_requests   = lbl("—", size=9, mono=True)
@@ -1201,12 +1202,13 @@ class MonitorApp(QMainWindow):
         self._sec_auth    = lbl("✓ Auth", size=8, color=C["green"])
 
         for w in [
-            _stat("Uptime srv", self._st_uptime_srv), _vsep(),
-            _stat("Uptime API", self._st_uptime_api), _vsep(),
-            _stat("Charge",     self._st_load),        _vsep(),
-            _stat("Latence",    self._st_ping),         _vsep(),
-            _stat("Requêtes",   self._st_requests),     _vsep(),
-            _stat("Version",    self._st_version),
+            _stat("Uptime srv",  self._st_uptime_srv), _vsep(),
+            _stat("API GMAPP",   self._st_uptime_api), _vsep(),
+            _stat("API BDC",     self._st_uptime_bdc), _vsep(),
+            _stat("Charge",      self._st_load),        _vsep(),
+            _stat("Latence",     self._st_ping),         _vsep(),
+            _stat("Requêtes",    self._st_requests),     _vsep(),
+            _stat("Version",     self._st_version),
         ]:
             h.addWidget(w)
             if not isinstance(w, QFrame):
@@ -1537,6 +1539,16 @@ class MonitorApp(QMainWindow):
             self._card_disk.update_disks(sys_.get("disks", []))
             self._st_uptime_srv.setText(_fmt_uptime(uptime))
             self._st_load.setText(f"{load[0]:.2f}" if load else "—")
+
+            # ── API BDC (port 8001) ───────────────────────────────────────
+            bdc_ok  = sys_.get("bdc_ok", False)
+            bdc_up  = sys_.get("bdc_uptime_s")
+            if bdc_ok and bdc_up is not None:
+                self._st_uptime_bdc.setText(_fmt_uptime(bdc_up))
+                self._st_uptime_bdc.setStyleSheet(f"color:{C['green']};background:transparent;")
+            else:
+                self._st_uptime_bdc.setText("hors ligne")
+                self._st_uptime_bdc.setStyleSheet(f"color:{C['red']};background:transparent;")
 
             # ── Bande passante réseau ──────────────────────────────────────
             net_sent = sys_.get("net_bytes_sent")
